@@ -10,6 +10,8 @@ app.use(cors());
 const ACCESS_SECRET = "access123";
 const REFRESH_SECRET = "refresh123";
 
+const PORT =  5000;
+
 // Dummy user
 const USER = {
   userId: "admin",
@@ -82,6 +84,6 @@ app.post("/refresh", (req, res) => {
   });
 });
 
-app.listen(5000, () => {
-  console.log("Server running on http://localhost:5000");
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
