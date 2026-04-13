@@ -38,54 +38,79 @@ const sanitizeUser = (user) => ({
 //    profilePicture (optional file — jpeg/png/webp, max 5MB)
 // ─────────────────────────────────────────────────────────────────────────────
 export const register = async (req, res) => {
-  // 1. Validate inputs
-  const errors = validateRegister(req.body);
-  if (errors.length > 0) {
-    if (req.file) fs.unlinkSync(req.file.path);
-    return sendError(res, { message: "Validation failed.", errors, statusCode: 400 });
-  }
+  try {
+    console.log("📥 Register Request Received");
+    console.log("Body:", req.body);
+    console.log("File:", req.file ? req.file.filename : "No file");
 
-  const { firstName, lastName, email, password } = req.body;
+    const { firstName, lastName, email, password } = req.body;
 
-  // 2. Check duplicate email — query the real DB
-  const exists = await UserModel.emailExists(email);
-  if (exists) {
-    if (req.file) fs.unlinkSync(req.file.path);
+    // 1. Simple manual validation (temporary - to avoid validator crash)
+    if (!firstName || !lastName || !email || !password) {
+      if (req.file) fs.unlinkSync(req.file.path);
+      return sendError(res, { 
+        message: "All fields are required", 
+        statusCode: 400 
+      });
+    }
+
+    if (password.length < 6) {
+      if (req.file) fs.unlinkSync(req.file.path);
+      return sendError(res, { 
+        message: "Password must be at least 6 characters", 
+        statusCode: 400 
+      });
+    }
+
+    // 2. Check duplicate email
+    const exists = await UserModel.emailExists(email);
+    if (exists) {
+      if (req.file) fs.unlinkSync(req.file.path);
+      return sendError(res, {
+        message: "An account with this email already exists.",
+        statusCode: 409,
+      });
+    }
+
+    // 3. Hash password
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    // 4. Save to database
+    const newUser = await UserModel.create({
+      firstName,
+      lastName,
+      email,
+      passwordHash,
+      profilePicture: req.file?.filename || null,
+      location: {}, // you can keep your location logic later
+    });
+
+    const { accessToken, refreshToken } = generateTokens(newUser.id);
+
+    return sendSuccess(res, {
+      message: "Registration successful!",
+      statusCode: 201,
+      data: {
+        user: sanitizeUser(newUser),
+        accessToken,
+        refreshToken,
+      },
+    });
+
+  } catch (error) {
+    console.error("❌ Register Error:", error);
+
+    // Clean up uploaded file if error occurs
+    if (req.file) {
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
+    }
+
     return sendError(res, {
-      message: "An account with this email already exists.",
-      statusCode: 409,
+      message: "Registration failed. Please try again.",
+      statusCode: 500,
+      error: error.message
     });
   }
-
-  // 3. Auto-detect location from IP
-  const ip = getClientIp(req);
-  const location = await fetchLocationFromIp(ip);
-
-  // 4. Hash password — never store plain text
-  const passwordHash = await bcrypt.hash(password, 12);
-
-  // 5. Insert into PostgreSQL
-  const newUser = await UserModel.create({
-    firstName,
-    lastName,
-    email,
-    passwordHash,
-    profilePicture: req.file?.filename || null,
-    location,
-  });
-
-  // 6. Issue JWT tokens
-  const { accessToken, refreshToken } = generateTokens(newUser.id);
-
-  return sendSuccess(res, {
-    message: "Registration successful!",
-    statusCode: 201,
-    data: {
-      user: sanitizeUser(newUser),
-      accessToken,
-      refreshToken,
-    },
-  });
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
