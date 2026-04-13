@@ -1,8 +1,7 @@
 import bcrypt from "bcryptjs";
-import { v4 as uuidv4 } from "uuid";
 import fs from "fs";
 
-import UserStore from "../models/userStore.js";
+import UserModel from "../models/user.model.js";
 import { generateTokens, verifyRefreshToken } from "../utils/jwt.js";
 import { sendSuccess, sendError } from "../utils/response.js";
 import { validateRegister, validateLogin } from "../validators/auth.validator.js";
@@ -10,23 +9,23 @@ import { getClientIp, fetchLocationFromIp } from "../utils/location.js";
 import config from "../config/env.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Helper: Build the public URL for a stored profile picture filename
+//  Helper: build full URL for a stored profile picture filename
 // ─────────────────────────────────────────────────────────────────────────────
 const profilePictureUrl = (filename) =>
   filename ? `${config.baseUrl}/uploads/${filename}` : null;
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Helper: Strip sensitive fields before sending user to frontend
+//  Helper: strip sensitive fields — NEVER send passwordHash to frontend
 // ─────────────────────────────────────────────────────────────────────────────
 const sanitizeUser = (user) => ({
-  id: user.id,
-  firstName: user.firstName,
-  lastName: user.lastName,
-  fullName: `${user.firstName} ${user.lastName}`,
-  email: user.email,
+  id:             user.id,
+  firstName:      user.firstName,
+  lastName:       user.lastName,
+  fullName:       `${user.firstName} ${user.lastName}`,
+  email:          user.email,
   profilePicture: profilePictureUrl(user.profilePicture),
-  location: user.location,
-  createdAt: user.createdAt,
+  location:       user.location,
+  createdAt:      user.createdAt,
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -35,25 +34,22 @@ const sanitizeUser = (user) => ({
 //  Content-Type: multipart/form-data
 //
 //  Frontend sends:
-//    firstName       (string, required)
-//    lastName        (string, required)
-//    email           (string, required)
-//    password        (string, required)
-//    confirmPassword (string, required)
-//    profilePicture  (file, optional — image/jpeg|png|webp, max 5MB)
+//    firstName, lastName, email, password, confirmPassword (all strings)
+//    profilePicture (optional file — jpeg/png/webp, max 5MB)
 // ─────────────────────────────────────────────────────────────────────────────
 export const register = async (req, res) => {
-  // 1. Validate fields
+  // 1. Validate inputs
   const errors = validateRegister(req.body);
   if (errors.length > 0) {
-    if (req.file) fs.unlinkSync(req.file.path); // discard upload on error
+    if (req.file) fs.unlinkSync(req.file.path);
     return sendError(res, { message: "Validation failed.", errors, statusCode: 400 });
   }
 
   const { firstName, lastName, email, password } = req.body;
 
-  // 2. Duplicate email check
-  if (UserStore.findByEmail(email)) {
+  // 2. Check duplicate email — query the real DB
+  const exists = await UserModel.emailExists(email);
+  if (exists) {
     if (req.file) fs.unlinkSync(req.file.path);
     return sendError(res, {
       message: "An account with this email already exists.",
@@ -61,26 +57,24 @@ export const register = async (req, res) => {
     });
   }
 
-  // 3. Auto-detect location from client IP
+  // 3. Auto-detect location from IP
   const ip = getClientIp(req);
   const location = await fetchLocationFromIp(ip);
 
-  // 4. Hash password
+  // 4. Hash password — never store plain text
   const passwordHash = await bcrypt.hash(password, 12);
 
-  // 5. Persist user
-  const newUser = UserStore.create({
-    id: uuidv4(),
-    firstName: firstName.trim(),
-    lastName: lastName.trim(),
-    email: email.toLowerCase().trim(),
+  // 5. Insert into PostgreSQL
+  const newUser = await UserModel.create({
+    firstName,
+    lastName,
+    email,
     passwordHash,
-    profilePicture: req.file?.filename || null, // stored filename only
+    profilePicture: req.file?.filename || null,
     location,
-    createdAt: new Date().toISOString(),
   });
 
-  // 6. Issue tokens
+  // 6. Issue JWT tokens
   const { accessToken, refreshToken } = generateTokens(newUser.id);
 
   return sendSuccess(res, {
@@ -99,8 +93,7 @@ export const register = async (req, res) => {
 //  POST /api/auth/login
 //  Content-Type: application/json
 //
-//  Frontend sends:
-//    { "email": "user@example.com", "password": "secret123" }
+//  Frontend sends: { "email": "...", "password": "..." }
 // ─────────────────────────────────────────────────────────────────────────────
 export const login = async (req, res) => {
   const errors = validateLogin(req.body);
@@ -109,21 +102,19 @@ export const login = async (req, res) => {
 
   const { email, password } = req.body;
 
-  // Find user
-  const user = UserStore.findByEmail(email);
-  if (!user)
-    return sendError(res, {
-      message: "Invalid email or password.",
-      statusCode: 401,
-    });
+  // Fetch user from DB
+  const user = await UserModel.findByEmail(email);
 
-  // Compare password
+  // Use same error message for "not found" and "wrong password"
+  // — never reveal which one failed (security best practice)
+  if (!user) {
+    return sendError(res, { message: "Invalid email or password.", statusCode: 401 });
+  }
+
   const isMatch = await bcrypt.compare(password, user.passwordHash);
-  if (!isMatch)
-    return sendError(res, {
-      message: "Invalid email or password.",
-      statusCode: 401,
-    });
+  if (!isMatch) {
+    return sendError(res, { message: "Invalid email or password.", statusCode: 401 });
+  }
 
   const { accessToken, refreshToken } = generateTokens(user.id);
 
@@ -140,14 +131,10 @@ export const login = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 //  REFRESH TOKEN
 //  POST /api/auth/refresh
-//  Content-Type: application/json
+//  Body: { "refreshToken": "..." }
 //
-//  Frontend sends:
-//    { "refreshToken": "<stored refresh token>" }
-//
-//  When to call this:
-//    When an API returns 403 with "Access token has expired",
-//    silently call this endpoint, get a new accessToken, and retry.
+//  Call this when any protected API returns 403.
+//  Get a new accessToken and retry silently.
 // ─────────────────────────────────────────────────────────────────────────────
 export const refresh = (req, res) => {
   const { refreshToken } = req.body;
@@ -168,15 +155,14 @@ export const refresh = (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  GET CURRENT USER  (me)
+//  GET CURRENT USER  (/me)
 //  GET /api/auth/me
 //  Header: Authorization: Bearer <accessToken>
 //
-//  Frontend use case:
-//    App launch → read stored tokens → call /me → populate HomeScreen.
+//  App launch → call this → populate HomeScreen from fresh DB data
 // ─────────────────────────────────────────────────────────────────────────────
-export const me = (req, res) => {
-  const user = UserStore.findById(req.user.userId);
+export const me = async (req, res) => {
+  const user = await UserModel.findById(req.user.userId);
   if (!user)
     return sendError(res, { message: "User not found.", statusCode: 404 });
 
