@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
-
 import config from "./config/env.js";
 import { connectDB } from "./config/db.js";
 import { runMigrations } from "./config/migrate.js";
@@ -11,19 +10,28 @@ import employeeRoutes from "./routes/employee.routes.js";
 import errorHandler from "./middlewares/errorHandler.js";
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 
-app.use(cors({ origin: config.clientUrl, credentials: true }));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// ✅ Updated CORS - Most Important for React Native
+app.use(cors({
+  origin: "*",                    // Allow all origins (good for testing)
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  exposedHeaders: ["Content-Length"]
+}));
 
-// Serve uploaded profile pictures
+// Increase limits for file upload
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// Serve uploaded files
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
 // Routes
-app.use("/api/auth",      authRoutes);
+app.use("/api/auth", authRoutes);
 app.use("/api/employees", employeeRoutes);
 
 // Health check
@@ -36,25 +44,24 @@ app.use((_req, res) =>
   res.status(404).json({ success: false, message: "Route not found." })
 );
 
-// Global error handler (must be last)
+// Global error handler
 app.use(errorHandler);
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Startup sequence:
-//  1. Connect to PostgreSQL
-//  2. Run migrations (create tables if they don't exist)
-//  3. Start HTTP server
-// ─────────────────────────────────────────────────────────────────────────────
+// Start server
 const start = async () => {
-  await connectDB();
-  await runMigrations();
-  app.listen(config.port, () => {
-    console.log(`\n🚀  Server running   → http://localhost:${config.port}`);
-    console.log(`📁  Uploads served  → http://localhost:${config.port}/uploads`);
-    console.log(`🌍  Environment     → ${config.nodeEnv}\n`);
-  });
+  try {
+    await connectDB();
+    await runMigrations();
+    app.listen(config.port, () => {
+      console.log(`\n🚀 Server running → http://localhost:${config.port}`);
+      console.log(`📁 Uploads served → http://localhost:${config.port}/uploads`);
+      console.log(`🌍 Environment → ${config.nodeEnv}\n`);
+    });
+  } catch (err) {
+    console.error("Failed to start server:", err);
+  }
 };
 
 start();
 
-export default app; 
+export default app;
